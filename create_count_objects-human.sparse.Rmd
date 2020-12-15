@@ -1,12 +1,24 @@
-#  If R was installed locally, use packages associated with that installation
-if (grepl("SPEAQeasy/Software/R-3.6.1/library", .libPaths()[1])) {
-    repo_dir = dirname(dirname(dirname(.libPaths()[1])))
-    library('checkpoint')
-    checkpoint::checkpoint("2019-08-05",
-                           project=paste0(repo_dir, '/scripts/'),
-                           checkpointLocation = paste0(repo_dir, '/Software/R-3.6.1/'))
-}
+---
+title: "create_count_objects-human using sparse matrices"
+output: html_notebook
+---
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
 
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r setup}
+
+knitr::opts_chunk$set(
+    # This should allow Rmarkdown to locate the data
+    root.dir = rprojroot::find_rstudio_root_file()
+)
+
+knitr::opts_knit$set(root.dir = './data')
+
+
+```
+
+```{r}
 ## Required libraries
 library('derfinder')
 library('BiocParallel')
@@ -14,7 +26,6 @@ library('Biostrings')
 library('GenomicRanges')
 library('GenomicFeatures')
 library('org.Hs.eg.db')
-library('biomaRt')
 library('jaffelab')
 library('getopt')
 library('rafalib')
@@ -32,7 +43,12 @@ mlog <- function(msg) {
   cat(msg, "| mem : "); pryr:::print.bytes(mem_used())
 }
 
+```
+
+Setting up the input parameters
+```{r}
 ## Specify parameters
+
 spec <- matrix(c(
     'organism', 'o', 1, 'character', 'Either hg19 or hg38',
     'experiment', 'e', 1, 'character', 'Experiment',
@@ -42,17 +58,22 @@ spec <- matrix(c(
     'ercc', 'c', 1, 'logical', 'Whether the reads include ERCC or not',
     'cores', 't', 1, 'integer', 'Number of cores to use',
     'salmon', 'n', 1, 'logical', 'Whether to use salmon quants rather than kallisto',
-    'no_biomart', 'b', 1, 'logical', 'Whether to continue without error if biomaRt cannot be reached',
     'help' , 'h', 0, 'logical', 'Display help'
 ), byrow=TRUE, ncol=5)
+
 #opt <- getopt(spec)
 ##-- geo test - simulate single input samples
+debugMode <- TRUE
 
 # DEBUG mode: populating the opt object since getopt() does not work here
 opt <- list('organism' = 'hg38', 'experiment' = 'Jlab_exp', 'prefix'='', 'paired' = FALSE,
             'stranded' = FALSE, 'ercc' = FALSE, 'cores' = 1,
-            'salmon' = FALSE, 'no_biomart' = TRUE)
+            'salmon' = FALSE)
 
+```
+
+
+```{r}
 ## if help was asked for print a friendly message
 ## and exit with a non-zero error code
 if (!is.null(opt$help)) {
@@ -81,8 +102,11 @@ manifest <- read.table('samples_complete.manifest', sep = ' ',
 metrics <- data.frame('SAMPLE_ID' = manifest[, ncol(manifest)-1],
     stringsAsFactors = FALSE)
 N <- length(metrics$SAMPLE_ID)
+```
 
-############################################################ 
+FastQC results
+
+```{r}
 ###### FastQC results
 flagNames = c("FQCbasicStats","perBaseQual","perTileQual","perSeqQual",
 			"perBaseContent","GCcontent","Ncontent","SeqLengthDist",
@@ -278,8 +302,11 @@ if (opt$paired==TRUE) {
 	
 	rm(qcFlags,y,zz,ind,sc,ac,seqlen,gcp,phred,phred2,adap,qcData,R)	
 }
-############################################################ 
+```
 
+Collect Salmon/Kallisto quantification data
+
+```{r}
 sampIDs = as.vector(metrics$SAMPLE_ID)
 if (opt$salmon) {
     ############################################################ 
@@ -304,14 +331,16 @@ if (opt$salmon) {
     #######################################################################
     #  Kallisto quantification 
     #######################################################################
+    mlog("before getting transcript counts (Kallisto)")
     txMatrices = bplapply(sampIDs, function(x) {
         read.table(paste0(x, "_abundance.tsv"),header = TRUE)}, 
         BPPARAM = MulticoreParam(opt$cores))
-        
     txTpm = do.call(cbind,lapply(txMatrices, function(x) x$tpm))
     txNumReads = do.call(cbind,lapply(txMatrices, function(x) x$est_counts))
     txNames = as.character(txMatrices[[1]]$target_id)
+    
     rm(txMatrices)
+    mlog("txTpm calculated")
 }
 
 colnames(txTpm) = colnames(txNumReads) = sampIDs
@@ -323,10 +352,12 @@ rm(txNames)
 colnames(txMap) = c("gencodeTx","txLength","gencodeID","Symbol","gene_type")
 rownames(txMap) = rownames(txTpm) = rownames(txNumReads) = txMap$gencodeTx
 
-############################################################ 
+mlog("txMap created")
+```
 
+ERCC plots
 
-############################################################ 
+```{r}
 ###### ercc plots
 if (opt$ercc == TRUE ){
 
@@ -362,9 +393,12 @@ if (opt$ercc == TRUE ){
 	metrics$ERCCsumLogErr = colSums(logErr)
 
 	}
-############################################################
+#############
+```
 
+BAM files stats
 
+```{r}
 ### add bam file
 metrics$bamFile <- file.path(".", paste0(metrics$SAMPLE_ID, "_accepted_hits.sorted.bam"))
 
@@ -417,17 +451,25 @@ hiStats <- do.call(rbind, lapply(logFiles, hisatStats))
 metrics = cbind(metrics,hiStats)	
 
 ### confirm total mapping
-metrics$totalMapped <- unlist(bplapply(metrics$bamFile, getTotalMapped,
+##-- geo DEBUG - skip BAM files
+if (debugMode) {
+ metrics$totalMapped <- metrics$numMapped
+ metrics$mitoMapped <- 0
+ metrics$mitoRate <- 0
+} else {
+ metrics$totalMapped <- unlist(bplapply(metrics$bamFile, getTotalMapped,
     chrs = paste0("chr", c(1:22, 'X', 'Y')), 
     BPPARAM = MulticoreParam(opt$cores)))
-metrics$mitoMapped <- unlist(bplapply(metrics$bamFile, getTotalMapped, chrs = 'chrM', 
+ metrics$mitoMapped <- unlist(bplapply(metrics$bamFile, getTotalMapped, chrs = 'chrM', 
     BPPARAM = MulticoreParam(opt$cores)))
-metrics$mitoRate <- metrics$mitoMapped / (metrics$mitoMapped +  metrics$totalMapped)
+ metrics$mitoRate <- metrics$mitoMapped / (metrics$mitoMapped +  metrics$totalMapped)
+}
+```
 
+Gencode annotation parsing, preparing geneMap
 
-###################################################################
-
-gencodeGTF = import(con=list.files(pattern=".*\\.gtf"), format="gtf")
+```{r}
+gencodeGTF = import(con=list.files(pattern=".*\\.gtf$"), format="gtf")
 gencodeGENES = mcols(gencodeGTF)[which(gencodeGTF$type=="gene"),c("gene_id","type","gene_type","gene_name")]
 rownames(gencodeGENES) = gencodeGENES$gene_id
 
@@ -465,66 +507,25 @@ geneMap$Geneid = NULL
 geneMap$gene_type = gencodeGENES[geneMap$gencodeID,"gene_type"]
 geneMap$Symbol = gencodeGENES[geneMap$gencodeID,"gene_name"]
 
-######### attempt to query biomaRt
-get_result = function() {
-    tryCatch({
-        if (opt$organism=="hg19") {
-            # VERSION 75, GRCh37.p13
-            ensembl = useMart("ENSEMBL_MART_ENSEMBL", 
-                dataset="hsapiens_gene_ensembl", host="feb2014.archive.ensembl.org")
-            sym = getBM(attributes = c("ensembl_gene_id", "entrezgene"), 
-                filters="ensembl_gene_id", values=geneMap$ensemblID, mart=ensembl)
-    
-            #  Rename for compatibility with hg38 data 
-            sym$entrezgene_id = sym$entrezgene
-            sym$entrezgene = NULL
-    
-        } else if (opt$organism=="hg38") {
-            # Latest GRCh38 biomaRt data
-            ensembl = useMart("ENSEMBL_MART_ENSEMBL",  
-                dataset="hsapiens_gene_ensembl")
-            sym = getBM(attributes = c("ensembl_gene_id", "entrezgene_id"), 
-                filters="ensembl_gene_id", values=geneMap$ensemblID, mart=ensembl)
-        }
-        return(list(sym, TRUE))
-    }, error = function(e) {
-        #  By default biomaRt info is required (failure to reach biomaRt is a fatal
-        #  error)
-        if (!opt$no_biomart) {
-            print("Error: the biomaRt query to obtain gene symbols failed. BiomaRt servers are likely down.")
-            stop()
-        }
-        #  Otherwise proceed with a warning
-        print("Proceeding without ensembl_gene_id and entrezgene_id info from biomaRt, as the databases could not be reached (and '--no_biomart' was specified)")
-        return(list(c(), FALSE))
-    })
-}
+geneMap$EntrezID = mapIds(org.Hs.eg.db, geneMap$Symbol, "ENTREZID", "SYMBOL")
 
-temp = get_result()
-sym = temp[[1]]
-has_internet_con = temp[[2]]
-## free memory
 rm(tmp)
-#########
 
-if (has_internet_con) {
-    geneMap$EntrezID = sym$entrezgene_id[match(geneMap$ensemblID, sym$ensembl_gene_id)]
-}
+mlog("Before gene counts")
+```
+Getting gene counts
 
-## counts
+```{r}
 geneCountList = mclapply(geneFn, function(x) {
-  cat(".")
-  #Matrix(read.delim(pipe(paste("cut -f7", x)), as.is=TRUE,skip=1)[,1])
-  #read.delim(pipe(paste("cut -f7", x)), as.is=TRUE,skip=1)[,1]
-  read.delim(x, as.is=TRUE, skip=1, colClasses=c(rep("NULL",6), "integer"))[,1]
+	cat(".")
+	#read.delim(pipe(paste("cut -f7", x)), as.is=TRUE,skip=1)[,1]
+	read.delim(x, as.is=TRUE, skip=1, colClasses=c(rep("NULL",6), "integer"))[,1]
 }, mc.cores=opt$cores)
-#restore sample order after parallel processing
-geneCountList=geneCountList[metrics$SAMPLE_ID]
+cat("\n")
 
 geneCounts = do.call("cbind", geneCountList)
-##-- are rownames really needed?
-#rownames(geneCounts) = rownames(geneMap)
-#geneCounts = geneCounts[,metrics$SAMPLE_ID] # put in order - there is no need
+rownames(geneCounts) = rownames(geneMap)
+geneCounts = geneCounts[,metrics$SAMPLE_ID] # put in order
 
 # number of reads assigned
 geneStatList = lapply(paste0(geneFn, ".summary"), 
@@ -552,7 +553,11 @@ write.csv(metrics, file = file.path(".",
     paste0('read_and_alignment_metrics_', EXPNAME,
     '.csv')))
 
-###############
+mlog("Gene Counts loaded")
+```
+Gathering exon counts
+
+```{r}
 ### exon counts
 
 #  Get filenames for exon counts in sample order present in manifest
@@ -567,33 +572,28 @@ names(exonFn) = metrics$SAMPLE_ID
 exonMap = read.delim(exonFn[1], skip=1, as.is=TRUE)[,1:6]
 exonMap$gencodeID = exonMap$Geneid
 exonMap$ensemblID = ss(exonMap$Geneid, "\\.")
-#rownames(exonMap) = paste0("e", rownames(exonMap))
+rownames(exonMap) = paste0("e", rownames(exonMap))
 exonMap$Geneid = NULL
 exonMap$gene_type = gencodeGENES[exonMap$gencodeID,"gene_type"]
 exonMap$Symbol = gencodeGENES[exonMap$gencodeID,"gene_name"]
 
-if (has_internet_con) {
-    exonMap$EntrezID = sym$entrezgene_id[match(exonMap$ensemblID, sym$ensembl_gene_id)]
-}
+exonMap$EntrezID = mapIds(org.Hs.eg.db, exonMap$Symbol, "ENTREZID", "SYMBOL")
 
 ## add gencode exon id
 exonMap = join(exonMap, gencodeEXONS, type="left", match="first")
 
 ## counts
+mlog("Getting exon counts")
+
 exonCountList = mclapply(exonFn, function(x) {
-  cat(".")
-	#Matrix(read.delim(pipe(paste("cut -f7", x)), as.is=TRUE,skip=1)[,1])
-  #read.delim(pipe(paste("cut -f7", x)), as.is=TRUE,skip=1)[,1]
-  read.delim(x, as.is=TRUE, skip=1, colClasses=c(rep("NULL",6), "integer"))[,1]
+	cat(".")
+	#read.delim(pipe(paste("cut -f7", x)), as.is=TRUE,skip=1)[,1]
+	read.delim(x, as.is=TRUE, skip=1, colClasses=c(rep("NULL",6), "integer"))[,1]
 }, mc.cores=opt$cores)
-
-#-- restore sample order after parallel processing
-exonCountList=exonCountList[metrics$SAMPLE_ID]
-
+cat("\n")
 exonCounts = do.call("cbind", exonCountList)
-###
-##rownames(exonCounts) = rownames(exonMap) # not needed?
-##exonCounts = exonCounts[,metrics$SAMPLE_ID] # put in order - no need 
+rownames(exonCounts) = rownames(exonMap)
+exonCounts = exonCounts[,metrics$SAMPLE_ID] # put in order
 
 ## remove duplicated
 eMap = GRanges(exonMap$Chr, IRanges(exonMap$Start, exonMap$End))
@@ -629,10 +629,13 @@ bgE = matrix(rep(colSums(exonCounts)), nc = nrow(metrics),
 widE = matrix(rep(exonMap$Length), nr = nrow(exonCounts), 
 	nc = nrow(metrics),	byrow=FALSE)
 exonRpkm = exonCounts/(widE/1000)/(bgE/1e6)
-
-
-############################
+###
+mlog("Exon Counts loaded")
+```
+Transcript maps
+```{r}
 ### add transcript maps ####
+getwd()
 
 load(list.files(pattern="feature_to_Tx.*\\.rda"))
 #  For gencode version 25 (the pipeline default), we have additional exon annotation
@@ -681,6 +684,12 @@ if (file.exists("exonMaps_by_coord_hg38_gencode_v25.rda")) {
 	exonMap$gencodeTx = sapply(tx,paste0,collapse=";")
 }
 
+###
+mlog("Transcript and Exon Maps added")
+```
+Create gene,exon RangedSummarizedExperiment objects 
+
+```{r}
 ## Create gene,exon RangedSummarizedExperiment objects
 
 gr_genes <- GRanges(seqnames = geneMap$Chr,
@@ -703,18 +712,13 @@ rse_exon <- SummarizedExperiment(assays = list('counts' = exonCounts),
     rowRanges = gr_exons, colData = metrics)
 save(rse_exon, file = paste0('rse_exon_', EXPNAME, '_n', N, '.Rdata'))
 
+###
 
-
-###################
-##### junctions
-
-## import the Junctions annotation
-load(list.files(pattern="junction_annotation_.*\\.rda"))
-
-## via primary alignments only
-junctionFiles <- file.path(".", paste0(metrics$SAMPLE_ID, '_junctions_primaryOnly_regtools.count'))
-stopifnot(all(file.exists(junctionFiles))) #  TRUE
-
+mlog("Transcript and Exon RSE objects saved")
+### 
+```
+Junction function from jaffelab package:
+```{r}
 #-------- jaffelab function 
 junctionCountFn = function (junctionFiles, sampleNames = names(junctionFiles), 
           output = c("Count", "Rail"), minOverhang = 0, 
@@ -799,8 +803,18 @@ junctionCountFn = function (junctionFiles, sampleNames = names(junctionFiles),
   return(out)
 }
 
+```
 
+```{r}
+getwd()
+###################
+##### junctions 
+## import theJunctions annotation
+load(list.files(pattern="junction_annotation_.*\\.rda"))
 
+## via primary alignments only
+junctionFiles <- file.path(".", paste0(metrics$SAMPLE_ID, '_junctions_primaryOnly_regtools.count'))
+stopifnot(all(file.exists(junctionFiles))) #  TRUE
 
 #  Handle strand in a consistent way regardless of differences between samples-
 #  if any samples are determined to be unstranded, process all samples as if unstranded.
@@ -818,7 +832,13 @@ jCountsLogical = DataFrame(sapply(juncCounts$countDF, function(x) x > 0))
 jIndex = which(rowSums(as.data.frame(jCountsLogical)) >= n) 
 juncCounts = lapply(juncCounts, function(x) x[jIndex,])
 
-
+###
+mlog("Junction Counts loaded")
+###
+ 
+```
+Annotation / jMap
+```{r}
 ############ anno/jMap
 anno = juncCounts$anno
 ## add additional annotation
@@ -850,17 +870,11 @@ anno$startExon = match(paste0(seqnames(anno),":",start(anno)-1),
 anno$endExon = match(paste0(seqnames(anno),":",end(anno)+1),
 	paste0(seqnames(exonGR), ":", start(exonGR)))
 
-if (has_internet_con) {
-    g = data.frame(leftGene = exonMap$gencodeID[anno$startExon],
-                   rightGene = exonMap$gencodeID[anno$endExon],
-                   leftGeneSym = exonMap$Symbol[anno$startExon],
-                   rightGeneSym = exonMap$Symbol[anno$endExon],
-                   stringsAsFactors=FALSE)
-} else {
-    g = data.frame(leftGene = exonMap$gencodeID[anno$startExon],
-                   rightGene = exonMap$gencodeID[anno$endExon],
-                   stringsAsFactors=FALSE)
-}
+g = data.frame(leftGene = exonMap$gencodeID[anno$startExon],
+               rightGene = exonMap$gencodeID[anno$endExon],
+               leftGeneSym = exonMap$Symbol[anno$startExon],
+               rightGeneSym = exonMap$Symbol[anno$endExon],
+               stringsAsFactors=FALSE)
 
 g$newGene = NA
 g$newGene[which(g$leftGene==g$rightGene)] = 
@@ -876,22 +890,20 @@ anno$newGeneID = g$newGene
 anno$isFusion = grepl("-", anno$newGeneID)
 anno$newGeneID[anno$code =="InGen"] = anno$gencodeGeneID[anno$code =="InGen"]
 
-if (has_internet_con) {
-    g$newGeneSym = NA
-    g$newGeneSym[which(g$leftGene==g$rightGene)] = 
-        g$leftGeneSym[which(g$leftGene==g$rightGene)]
-    g$newGeneSym[which(g$leftGene!=g$rightGene)] = 
-        paste0(g$leftGeneSym,"-",g$rightGeneSym)[which(g$leftGene!=g$rightGene)]
-    g$newGeneSym[which(is.na(g$newGeneSym) & is.na(g$leftGene))] = 
-        g$rightGeneSym[which(is.na(g$newGeneSym) & is.na(g$leftGene))] 
-    g$newGeneSym[which(is.na(g$newGeneSym) & is.na(g$rightGene))] = 
-        g$leftGeneSym[which(is.na(g$newGeneSym) & is.na(g$rightGene))] 
-    g$newGeneSym[g$newGeneSym==""] = NA
-    g$newGeneSym[g$newGeneSym=="-"] = NA
+g$newGeneSym = NA
+g$newGeneSym[which(g$leftGene==g$rightGene)] = 
+    g$leftGeneSym[which(g$leftGene==g$rightGene)]
+g$newGeneSym[which(g$leftGene!=g$rightGene)] = 
+    paste0(g$leftGeneSym,"-",g$rightGeneSym)[which(g$leftGene!=g$rightGene)]
+g$newGeneSym[which(is.na(g$newGeneSym) & is.na(g$leftGene))] = 
+    g$rightGeneSym[which(is.na(g$newGeneSym) & is.na(g$leftGene))] 
+g$newGeneSym[which(is.na(g$newGeneSym) & is.na(g$rightGene))] = 
+    g$leftGeneSym[which(is.na(g$newGeneSym) & is.na(g$rightGene))] 
+g$newGeneSym[g$newGeneSym==""] = NA
+g$newGeneSym[g$newGeneSym=="-"] = NA
     
-    anno$newGeneSymbol = g$newGeneSym
-    anno$newGeneSymbol[anno$code =="InGen"] = anno$Symbol[anno$code =="InGen"]
-}
+anno$newGeneSymbol = g$newGeneSym
+anno$newGeneSymbol[anno$code =="InGen"] = anno$Symbol[anno$code =="InGen"]
 
 
 ## extract out jMap
@@ -914,16 +926,14 @@ rownames(jCounts) = rownames(jRpkm) = names(jMap)
 colnames(jRpkm)  = metrics$SAMPLE_ID 
 jMap$meanExprs = rowMeans(jRpkm)
 
+###
+mlog("Junction Map and RPKMs created")
+### 
+```
 
-# ## sequence of acceptor/donor sites
-# left = right = jMap
-# end(left) = start(left) +1
-# start(right) = end(right) -1
-# jMap$leftSeq  = getSeq(Hsapiens, left)
-# jMap$rightSeq = getSeq(Hsapiens, right)
+Saving counts
 
-
-
+```{r}
 ### save counts
 
 tosaveCounts = c("metrics", "geneCounts", "geneMap", "exonCounts", "exonMap", "jCounts", "jMap", 
@@ -957,9 +967,15 @@ rse_tx = SummarizedExperiment(
     colData = metrics, rowRanges = txMap)
 save(rse_tx, file = paste0('rse_tx_', EXPNAME, '_n', N, '.Rdata'))
 
+###
+mlog("Done. Junction and Transcript RSE saved")
+###
+
 ## Reproducibility information
-print('Reproducibility information:')
-Sys.time()
-proc.time()
-options(width = 120)
-session_info()
+#print('Reproducibility information:')
+#Sys.time()
+#proc.time()
+#options(width = 120)
+#session_info()
+```
+
