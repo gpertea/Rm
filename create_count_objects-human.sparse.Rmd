@@ -516,40 +516,53 @@ mlog("Before gene counts")
 Getting gene counts
 
 ```{r}
-geneCountList = mclapply(geneFn, function(x) {
+cat("loading gene counts ")
+geneCountList = lapply(geneFn, function(x) {
 	cat(".")
-	#read.delim(pipe(paste("cut -f7", x)), as.is=TRUE,skip=1)[,1]
-	read.delim(x, as.is=TRUE, skip=1, colClasses=c(rep("NULL",6), "integer"))[,1]
-}, mc.cores=opt$cores)
-cat("\n")
+	Matrix(read.delim(x, as.is=TRUE, skip=1, colClasses=c(rep("NULL",6), "integer"))[,1], sparse=TRUE)
+  #read.delim(x, as.is=TRUE, skip=1, colClasses=c(rep("NULL",6), "integer"))[,1]
+})
+cat(" done.\n")
+#restore sample order after parallel processing? mclapply should preserve the order?
+#geneCountList=geneCountList[metrics$SAMPLE_ID]
 
 geneCounts = do.call("cbind", geneCountList)
+
+# are rownames really needed?
 rownames(geneCounts) = rownames(geneMap)
-geneCounts = geneCounts[,metrics$SAMPLE_ID] # put in order
+##no need to put in order, if geneCountList was already sorted?
+#geneCounts = geneCounts[,metrics$SAMPLE_ID] # put in order
+
+## are rownames really needed?
+#rownames(sp_geneCounts) = rownames(geneMap)
+#no need to put in order, if geneCountList was already sorted?
+# -- cannot sort sparse matrix
+#sp_geneCounts = sp_geneCounts[,metrics$SAMPLE_ID] # put in order
 
 # number of reads assigned
 geneStatList = lapply(paste0(geneFn, ".summary"), 
-	read.delim,row.names=1)
+	read.delim, row.names=1)
 geneStats = do.call("cbind", geneStatList)
 colnames(geneStats) = metrics$SAMPLE_ID
 metrics$totalAssignedGene = as.numeric(geneStats[1,] / colSums(geneStats))
 ## Add all the other stats from featureCounts at the gene level
 geneStats_t <- t(geneStats)
 colnames(geneStats_t) <- paste0('gene_', colnames(geneStats_t))
-metrics <- cbind(metrics, geneStats_t)
+tmetrics <- cbind(metrics, geneStats_t)
 
 # rna Rate
-metrics$rRNA_rate = colSums(geneCounts[which(geneMap$gene_type == "rRNA"),])/colSums(geneCounts)
+tmetrics$rRNA_rate = colSums(geneCounts[which(geneMap$gene_type == "rRNA"),])/colSums(geneCounts)
 
 # make RPKM
-bg = matrix(rep(as.numeric(geneStats["Assigned",])), nc = nrow(metrics), 
-	nr = nrow(geneCounts),	byrow=TRUE)
+bg = matrix(rep(as.numeric(geneStats["Assigned",])), nc = nrow(tmetrics), 
+	          nr = nrow(geneCounts),	byrow=TRUE)
 widG = matrix(rep(geneMap$Length), nr = nrow(geneCounts), 
-	nc = nrow(metrics),	byrow=FALSE)
+	          nc = nrow(tmetrics),	byrow=FALSE)
 geneRpkm = geneCounts/(widG/1000)/(bg/1e6)
+#mode(geneCounts@x) <- "integer"
 
 ## save metrics
-write.csv(metrics, file = file.path(".",
+write.csv(tmetrics, file = file.path(".",
     paste0('read_and_alignment_metrics_', EXPNAME,
     '.csv')))
 
@@ -559,7 +572,7 @@ Gathering exon counts
 
 ```{r}
 ### exon counts
-
+#setwd("./data")
 #  Get filenames for exon counts in sample order present in manifest
 exonFn = rep('', length(metrics$SAMPLE_ID))
 for (i in 1:length(metrics$SAMPLE_ID)) {
@@ -585,15 +598,21 @@ exonMap = join(exonMap, gencodeEXONS, type="left", match="first")
 ## counts
 mlog("Getting exon counts")
 
-exonCountList = mclapply(exonFn, function(x) {
+exonCountList = lapply(exonFn, function(x) {
 	cat(".")
-	#read.delim(pipe(paste("cut -f7", x)), as.is=TRUE,skip=1)[,1]
-	read.delim(x, as.is=TRUE, skip=1, colClasses=c(rep("NULL",6), "integer"))[,1]
-}, mc.cores=opt$cores)
-cat("\n")
+	#read.delim(x, as.is=TRUE, skip=1, colClasses=c(rep("NULL",6), "integer"))[,1]
+	Matrix(read.delim(x, as.is=TRUE, skip=1, colClasses=c(rep("NULL",6), "integer"))[,1])
+})
+cat(" loaded.\n")
 exonCounts = do.call("cbind", exonCountList)
+
 rownames(exonCounts) = rownames(exonMap)
-exonCounts = exonCounts[,metrics$SAMPLE_ID] # put in order
+
+## for dcgMatrix we need to restore column names:
+#colnames(exonCounts) =  metrics$SAMPLE_ID
+
+## no need to, exonFn is in the right order
+#exonCounts = exonCounts[,metrics$SAMPLE_ID] # put in order
 
 ## remove duplicated
 eMap = GRanges(exonMap$Chr, IRanges(exonMap$Start, exonMap$End))
@@ -629,6 +648,7 @@ bgE = matrix(rep(colSums(exonCounts)), nc = nrow(metrics),
 widE = matrix(rep(exonMap$Length), nr = nrow(exonCounts), 
 	nc = nrow(metrics),	byrow=FALSE)
 exonRpkm = exonCounts/(widE/1000)/(bgE/1e6)
+#mode(exonCounts@x) <- "integer"
 ###
 mlog("Exon Counts loaded")
 ```
@@ -699,7 +719,7 @@ mcols(gr_genes) <- DataFrame(geneMap[, - which(colnames(geneMap) %in%
     c('Chr', 'Start', 'End', 'Strand'))])
 
 rse_gene <- SummarizedExperiment(assays = list('counts' = geneCounts),
-    rowRanges = gr_genes, colData = metrics)
+    rowRanges = gr_genes, colData = tmetrics)
 save(rse_gene, file = paste0('rse_gene_', EXPNAME, '_n', N, '.Rdata'))
 
 gr_exons <- GRanges(seqnames = exonMap$Chr,
@@ -709,8 +729,13 @@ mcols(gr_exons) <- DataFrame(exonMap[, - which(colnames(exonMap) %in%
     c('Chr', 'Start', 'End', 'Strand'))])
     
 rse_exon <- SummarizedExperiment(assays = list('counts' = exonCounts),
-    rowRanges = gr_exons, colData = metrics)
+    rowRanges = gr_exons, colData = tmetrics)
 save(rse_exon, file = paste0('rse_exon_', EXPNAME, '_n', N, '.Rdata'))
+#release from memory
+rm(rse_exon)
+rm(rse_gene)
+rm(gr_exons)
+rm(gr_genes)
 
 ###
 
@@ -819,13 +844,9 @@ stopifnot(all(file.exists(junctionFiles))) #  TRUE
 #  Handle strand in a consistent way regardless of differences between samples-
 #  if any samples are determined to be unstranded, process all samples as if unstranded.
 #  Otherwise, process samples as all stranded.
-if (any(manifest[,ncol(manifest)] == "unstranded")) {
-	juncCounts = junctionCountFn(junctionFiles, metrics$SAMPLE_ID,
-		output = "Count", maxCores=opt$cores,strandSpecific=FALSE)
-} else {
-	juncCounts = junctionCountFn(junctionFiles, metrics$SAMPLE_ID,
-		output = "Count", maxCores=opt$cores,strandSpecific=TRUE)
-}
+stranded <- !any(manifest[,ncol(manifest)] == "unstranded")
+juncCounts = junctionCountFn(junctionFiles, metrics$SAMPLE_ID,
+		output = "Count", maxCores=opt$cores,strandSpecific=stranded)
 ## filter junction counts - drop jxns in <1% of samples
 n = max(1, floor(N/100))
 jCountsLogical = DataFrame(sapply(juncCounts$countDF, function(x) x > 0))
@@ -918,7 +939,7 @@ jCounts = jCounts[names(jMap),gsub("-",".",metrics$SAMPLE_ID)] # ensure lines up
 colnames(jCounts) = metrics$SAMPLE_ID  # change from '.' to hyphens if needed
 
 ############ jRpkm
-bgJ = matrix(rep(colSums(jCounts)), nc = nrow(metrics), 
+bgJ = matrix(rep(colSums(jCounts)), nc = nrow(tmetrics), 
 	nr = nrow(jCounts),	byrow=TRUE)
 jRpkm = jCounts/(bgJ/10e6)
 
@@ -936,9 +957,9 @@ Saving counts
 ```{r}
 ### save counts
 
-tosaveCounts = c("metrics", "geneCounts", "geneMap", "exonCounts", "exonMap", "jCounts", "jMap", 
+tosaveCounts = c("tmetrics", "geneCounts", "geneMap", "exonCounts", "exonMap", "jCounts", "jMap", 
 					"txNumReads", "txMap" )
-tosaveRpkm = c("metrics", "geneRpkm", "geneMap", "exonRpkm", "exonMap", "jRpkm", "jMap", 
+tosaveRpkm = c("tmetrics", "geneRpkm", "geneMap", "exonRpkm", "exonMap", "jRpkm", "jMap", 
 					"txTpm", "txNumReads", "txMap" )
 
 if (exists("erccTPM")) {
@@ -954,7 +975,7 @@ save(list=ls()[ls() %in% tosaveRpkm], compress=TRUE,
 	
 ## Create RangedSummarizedExperiment objects
 rse_jx <- SummarizedExperiment(assays = list('counts' = jCounts),
-    rowRanges = jMap, colData = metrics)
+    rowRanges = jMap, colData = tmetrics)
 save(rse_jx, file = paste0('rse_jx_', EXPNAME, '_n', N, '.Rdata'))
 
 ## transcript
@@ -964,7 +985,7 @@ txTpm = txTpm[which(rownames(txTpm) %in% names(tx)),]
 txMap = tx[rownames(txTpm)]
 rse_tx = SummarizedExperiment(
 	assays = list('tpm' = txTpm),
-    colData = metrics, rowRanges = txMap)
+    colData = tmetrics, rowRanges = txMap)
 save(rse_tx, file = paste0('rse_tx_', EXPNAME, '_n', N, '.Rdata'))
 
 ###
